@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
+#include <limits.h>
 #include "linux/i2c-dev.h"
 
 enum BERRY_IMU_DEVICES {
@@ -176,6 +178,8 @@ enum LSM9DS1_RESPONSES {
 	LSM9DS1_WHO_AM_I_M_RSP=0x3D
 };
 
+const uint8_t ENABLE_AUTO_INC=0x80; // On reads, enable auto increment of register for block data
+
 /* Utility functions */
 void inline i2cSelectDevice(int file, int addr)
 {
@@ -184,15 +188,39 @@ void inline i2cSelectDevice(int file, int addr)
 	}
 }
 
+void microsleep(long mseconds){
+    timespec t;
+    t.tv_sec = 0;
+    t.tv_nsec = mseconds * 1000;
+    if (nanosleep(&t, NULL) == -1) {
+        printf("Error: Sleep interupted\n");
+    }
+}
+
+void as_binary(uint8_t byte, char *buffer) {
+    uint8_t mask = 0x80; // Init mask to 0b10000000
+    for (int x=0; x < 8; x++){
+        if (byte & mask) {
+            buffer[x] = '1';
+        } else {
+            buffer[x] = '0';
+        }
+        mask >>= 1;
+    }
+    buffer[8] = '\0';
+}
+
 class BerryIMU {
     public:
         BerryIMU(void);
         ~BerryIMU(void);
         void status(void);
+        void readDevice(BERRY_IMU_DEVICES device, int &x, int &y, int &z);
     protected:
         void identify(void);
         void enable(void);
     private:
+        uint8_t scratch_block[6];
         int file;
         CHIPSETS chip;
         inline bool is_LSM9DS0(void);
@@ -312,7 +340,20 @@ void BerryIMU::enable_LSM9DS0(void) {
 void BerryIMU::enable_LSM9DS1(void) {
     // Enable the accelerometer
     writeReg(ACCELEROMETER, LSM9DS1_CTRL_REG5_XL,0b00111000);   // z, y, x axis enabled for accelerometer
-    writeReg(ACCELEROMETER, LSM9DS1_CTRL_REG6_XL,0b00101000);   // +/- 16g
+
+    const uint8_t ACC_ODR_OFF = 0b00000000;
+    const uint8_t ACC_ODR_10 =  0b00100000;
+    const uint8_t ACC_ODR_50 =  0b01000000;
+    const uint8_t ACC_ODR_119 = 0b01100000;
+    const uint8_t ACC_ODR_238 = 0b10000000;
+    const uint8_t ACC_ODR_476 = 0b10100000;
+    const uint8_t ACC_ODR_952 = 0b11000000;
+    const uint8_t ACC_SCALE_2g =  0b00000000;
+    const uint8_t ACC_SCALE_4g =  0b00001000;
+    const uint8_t ACC_SCALE_8g =  0b00010000;
+    const uint8_t ACC_SCALE_16g = 0b00011000;
+
+    writeReg(ACCELEROMETER, LSM9DS1_CTRL_REG6_XL, ACC_ODR_10 | ACC_SCALE_2g);
 
     //Enable the magnetometer
     writeReg(MAGNETOMETER, LSM9DS1_CTRL_REG1_M, 0b10011100);   // Temp compensation enabled,Low power mode mode,80Hz ODR
@@ -324,6 +365,19 @@ void BerryIMU::enable_LSM9DS1(void) {
     writeReg(GYROSCOPE, LSM9DS1_CTRL_REG4,0b00111000);      // z, y, x axis enabled for gyro
     writeReg(GYROSCOPE, LSM9DS1_CTRL_REG1_G,0b10111000);    // Gyro ODR = 476Hz, 2000 dps
     writeReg(GYROSCOPE, LSM9DS1_ORIENT_CFG_G,0b10111000);   // Swap orientation 
+
+    // Enable autoincrement on multibyte reads
+    this->selectDevice(ACCELEROMETER);
+    uint8_t result = i2c_smbus_read_byte_data(this->file, LSM9DS1_CTRL_REG8);
+    uint8_t IF_ADD_INC = 0b00000100;
+    if ((result & IF_ADD_INC) == 0) {
+        result |= IF_ADD_INC;
+    }
+	int writeres = i2c_smbus_write_byte_data(this->file, LSM9DS1_CTRL_REG8, result);
+	if (writeres == -1){
+		printf ("Failed to write byte to CTRL_REG8");
+		exit(1);
+	}
 }
 
 void BerryIMU::selectDevice(BERRY_IMU_DEVICES device) {
@@ -338,7 +392,7 @@ void BerryIMU::selectDevice(BERRY_IMU_DEVICES device) {
 }
 
 void BerryIMU::writeReg(BERRY_IMU_DEVICES device, uint8_t reg, uint8_t value) {
-    this->selectDevice(BERRY_IMU_DEVICES::ACCELEROMETER);
+    this->selectDevice(device);
 	int result = i2c_smbus_write_byte_data(this->file, reg, value);
 	if (result == -1){
 		printf ("Failed to write byte to I2C accelerometer");
@@ -346,9 +400,55 @@ void BerryIMU::writeReg(BERRY_IMU_DEVICES device, uint8_t reg, uint8_t value) {
 	}
 }
 
+void BerryIMU::readDevice(BERRY_IMU_DEVICES device, int &x, int &y, int &z){
+    int bytes;
+    uint8_t BASE_ACC_REG;
+    uint8_t command;
+
+    this->selectDevice(device);
+    switch(this->chip) {
+        case LSM9DS0:
+            BASE_ACC_REG = LSM9DS0_OUT_X_L_A;
+            break;
+        case LSM9DS1:
+            BASE_ACC_REG = LSM9DS1_OUT_X_L_XL;
+            break;
+    }
+    command = ENABLE_AUTO_INC | BASE_ACC_REG;
+	bytes = i2c_smbus_read_i2c_block_data(this->file, command,
+        sizeof(this->scratch_block), this->scratch_block);
+    if (bytes != sizeof(this->scratch_block)){
+		printf("Failed to read block from I2C.");
+		exit(1);
+	}
+
+    // Convert the high and low bytes of each axis into words
+	x = (int16_t)(this->scratch_block[0] | this->scratch_block[1] << 8);
+	y = (int16_t)(this->scratch_block[2] | this->scratch_block[3] << 8);
+	z = (int16_t)(this->scratch_block[4] | this->scratch_block[5] << 8);
+}
+
+
+float conv(int val, float scale){
+    // Convert an 16-bit signed value into floating point, assuming a given scale.
+    return ((float)val / SHRT_MAX) * scale;
+}
+
 int main(void) {
     BerryIMU imu;
+    int x, y, z;
+    int count;
 
     imu.status();
+    for (count = 0; count < 500; count++){
+        float xf, yf, zf;
+        imu.readDevice(BERRY_IMU_DEVICES::ACCELEROMETER, x, y, z);
+        // Convert scaled integer values to floating point
+        xf = conv(x, 2.0);
+        yf = conv(y, 2.0);
+        zf = conv(z, 2.0);
+        printf("x: %f, y:%f, z:%f\n", xf, yf, zf);
+        // microsleep(100000);
+    }
     return 1;
 }
