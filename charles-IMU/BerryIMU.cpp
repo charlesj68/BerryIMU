@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <limits.h>
 #include "linux/i2c-dev.h"
 
@@ -372,12 +373,12 @@ void BerryIMU::enable_LSM9DS1(void) {
     uint8_t IF_ADD_INC = 0b00000100;
     if ((result & IF_ADD_INC) == 0) {
         result |= IF_ADD_INC;
+        int writeres = i2c_smbus_write_byte_data(this->file, LSM9DS1_CTRL_REG8, result);
+        if (writeres == -1){
+            printf ("Failed to write byte to CTRL_REG8");
+            exit(1);
+        }
     }
-	int writeres = i2c_smbus_write_byte_data(this->file, LSM9DS1_CTRL_REG8, result);
-	if (writeres == -1){
-		printf ("Failed to write byte to CTRL_REG8");
-		exit(1);
-	}
 }
 
 void BerryIMU::selectDevice(BERRY_IMU_DEVICES device) {
@@ -434,21 +435,69 @@ float conv(int val, float scale){
     return ((float)val / SHRT_MAX) * scale;
 }
 
+long unsigned mymillis()
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (tv.tv_sec) * 1000 + (tv.tv_usec)/1000;
+}
+
+void spin_until(unsigned long trigger_time) {
+    unsigned long current;
+
+    while (1){
+        current = mymillis();
+        if (current >= trigger_time) {
+            return;
+        }
+    }
+}
+
+const int samples = 500;
+int x_pop[samples];
+int y_pop[samples];
+int z_pop[samples];
+const int zero_g_x_offset = 212;
+const int zero_g_y_offset = -667;
+const int zero_g_z_offset = -14;
+const unsigned int sample_period = 5; // desired minimum milliseconds between samples
+
 int main(void) {
     BerryIMU imu;
     int x, y, z;
     int count;
+    long unsigned ts;
 
     imu.status();
-    for (count = 0; count < 500; count++){
+    for (count = 0; count < samples; count++){
         float xf, yf, zf;
         imu.readDevice(BERRY_IMU_DEVICES::ACCELEROMETER, x, y, z);
+        x -= zero_g_x_offset;
+        y -= zero_g_y_offset;
+        z -= zero_g_z_offset;
+        x_pop[count] = x;
+        y_pop[count] = y;
+        z_pop[count] = z;
+        ts = mymillis();
         // Convert scaled integer values to floating point
         xf = conv(x, 2.0);
         yf = conv(y, 2.0);
         zf = conv(z, 2.0);
-        printf("x: %f, y:%f, z:%f\n", xf, yf, zf);
-        // microsleep(100000);
+        printf("ts: %lu, (%d, %d, %d), (%f, %f, %f)\n", ts, x, y, z, xf, yf, zf);
+        spin_until(ts + sample_period);
     }
+    // Calculate average across samples
+    long x_sum = 0;
+    long y_sum = 0;
+    long z_sum = 0;
+    for (count = 0; count < samples; count++) {
+        x_sum += x_pop[count];
+        y_sum += y_pop[count];
+        z_sum += z_pop[count];
+    }
+    printf("Stats\n");
+    printf("avg(x): %d\n", x_sum / samples);
+    printf("avg(y): %d\n", y_sum / samples);
+    printf("avg(z): %d\n", z_sum / samples);
     return 1;
 }
