@@ -453,7 +453,7 @@ void spin_until(unsigned long trigger_time) {
     }
 }
 
-const int samples = 500;
+const int samples = 20000;
 int x_pop[samples];
 int y_pop[samples];
 int z_pop[samples];
@@ -462,42 +462,52 @@ const int zero_g_y_offset = -667;
 const int zero_g_z_offset = -14;
 const unsigned int sample_period = 5; // desired minimum milliseconds between samples
 
+void data_to_json_string(char * buffer, struct timeval *tv, int x, int y, int z, float xf, float yf, float zf) {
+    static char tmbuf[64], buf[64];
+    time_t nowtime;
+    struct tm *nowtm;
+
+    // Ref: StackOverflow 
+    // https://stackoverflow.com/questions/2408976/struct-timeval-to-printable-format
+    nowtime = tv->tv_sec;
+    nowtm = localtime(&nowtime);
+    strftime(tmbuf, sizeof tmbuf, "%Y-%m-%d %H:%M:%S", nowtm);
+    snprintf(buf, sizeof buf, "%s.%06ld", tmbuf, tv->tv_usec);
+    // sprintf(buffer, "{\"time\":\"%s\",\"x\":%d,\"y\":%d,\"z\":%d,\"xf\":%f,\"yf\":%f,\"zf\":%f}", buf, x, y, z, xf, yf, zf);
+    sprintf(buffer, "{\"time\":\"%s\",\"x\":%f,\"y\":%f,\"z\":%f}", buf, xf, yf, zf);
+}
+
 int main(void) {
     BerryIMU imu;
     int x, y, z;
     int count;
-    long unsigned ts;
+    struct timeval tv;
+    uint64_t ts;
+    char buffer[120];
+    FILE *dfile;
 
     imu.status();
-    for (count = 0; count < samples; count++){
-        float xf, yf, zf;
-        imu.readDevice(BERRY_IMU_DEVICES::ACCELEROMETER, x, y, z);
-        x -= zero_g_x_offset;
-        y -= zero_g_y_offset;
-        z -= zero_g_z_offset;
-        x_pop[count] = x;
-        y_pop[count] = y;
-        z_pop[count] = z;
-        ts = mymillis();
-        // Convert scaled integer values to floating point
-        xf = conv(x, 2.0);
-        yf = conv(y, 2.0);
-        zf = conv(z, 2.0);
-        printf("ts: %lu, (%d, %d, %d), (%f, %f, %f)\n", ts, x, y, z, xf, yf, zf);
-        spin_until(ts + sample_period);
+    if ((dfile = fopen("data.json", "w")) != NULL) {
+        for (count = 0; count < samples; count++){
+            float xf, yf, zf;
+            imu.readDevice(BERRY_IMU_DEVICES::ACCELEROMETER, x, y, z);
+            x -= zero_g_x_offset;
+            y -= zero_g_y_offset;
+            z -= zero_g_z_offset;
+            x_pop[count] = x;
+            y_pop[count] = y;
+            z_pop[count] = z;
+        	gettimeofday(&tv, NULL);
+            ts = mymillis();
+            // Convert scaled integer values to floating point
+            xf = conv(x, 2.0);
+            yf = conv(y, 2.0);
+            zf = conv(z, 2.0);
+            data_to_json_string(buffer, &tv, x, y, z, xf, yf, zf);
+            fprintf(dfile, "%s\n", buffer);
+            spin_until(ts + sample_period);
+        }
+        fclose(dfile);
     }
-    // Calculate average across samples
-    long x_sum = 0;
-    long y_sum = 0;
-    long z_sum = 0;
-    for (count = 0; count < samples; count++) {
-        x_sum += x_pop[count];
-        y_sum += y_pop[count];
-        z_sum += z_pop[count];
-    }
-    printf("Stats\n");
-    printf("avg(x): %d\n", x_sum / samples);
-    printf("avg(y): %d\n", y_sum / samples);
-    printf("avg(z): %d\n", z_sum / samples);
     return 1;
 }
