@@ -453,7 +453,7 @@ void spin_until(unsigned long trigger_time) {
     }
 }
 
-const int samples = 20000;
+const int samples = 40000;
 int x_pop[samples];
 int y_pop[samples];
 int z_pop[samples];
